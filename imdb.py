@@ -1,9 +1,12 @@
+import datetime
+from decimal import Decimal
 import re
 import urllib2
 
 from lxml.html import parse
 
 asciionly = re.compile(r'[^a-zA-Z]')
+numonly = re.compile(r'[^0-9]')
 
 class InvalidIDException(Exception):
     def __str__(self):
@@ -15,7 +18,7 @@ class Title(object):
             id = str(id)
         m = re.search(r'(?:tt)?(?P<id>\d{7})', id, re.I)
         if m:
-            self.id = m.group('id')
+            self.id = 'tt%s' % m.group('id')
         else:
             raise ValueError('Invalid IMDB id. (%s)' % id)
 
@@ -44,7 +47,9 @@ class Title(object):
     def _infodiv(self, title, find=None):
         try:
             if not find:
-                return self.infodivs[title].text.replace('\n', '').strip()
+                for el in self.infodivs[title].cssselect('.tn15more'):
+                    el.drop_tree()
+                return self.infodivs[title].text_content().replace('\n', '').strip()
             else:
                 return [x.text.replace('\n', '').strip() for x in self.infodivs[title].findall('.//%s' % find)]
                 
@@ -57,7 +62,7 @@ class Title(object):
 
     def update(self):
         try:
-            data = urllib2.urlopen('http://www.imdb.com/title/tt%s/' % self.id)
+            data = urllib2.urlopen('http://www.imdb.com/title/%s/' % self.id)
         except urllib2.HTTPError, e:
             raise ValueError('Invalid IMDB id. (%s)' % self.id)
 
@@ -74,18 +79,21 @@ class Title(object):
                 self.infodivs[new] = self.infodivs[old]
 
         try:
-            self.title = data.find('head').find('titles').text
+            self.title = data.find('head').find('title').text
         except AttributeError:
             self.title = 'Unknown title'
 
         year = re.search(r'\((?P<year>\d{4})\)$', self.title)
         if year:
-            self.year = year.group('year')
+            self.year = int(year.group('year'))
             self.title = re.sub(r'\s\(\d{4}\)$', '', self.title)
         
         if 'directors' in self.infodivs:
-            self.directors = [x.text for x in self.infodivs['directors'].findall('.//a')]
+            self.directors = [(x.text, (x.get('href').split('/')[2] if x.get('href', None) else None)) for x in self.infodivs['directors'].findall('.//a')]
         
+        if 'writers' in self.infodivs:
+            self.writers = [(x.text, (x.get('href').split('/')[2] if x.get('href', None) else None), x.tail.split(')')[0].split('(')[-1]) for x in self.infodivs['writers'].findall('.//a') if x.get('class', '') != 'tn15more']
+
         if 'genre' in self.infodivs:
             self.genres = [x.text for x in self.infodivs['genre'].findall('.//a') if '/Sections' in x.attrib.get('href')]
         if 'alsoknownas' in self.infodivs:
@@ -94,20 +102,24 @@ class Title(object):
         try:
             rating = data.get_element_by_id('tn15rating')
             if rating is not None:
-                self.rating = rating.cssselect('div .starbar-meta b')[0].text
-                self.votes = rating.cssselect('div .starbar-meta a')[0].text
+                self.rating = Decimal(rating.cssselect('div .starbar-meta b')[0].text.replace('/10', ''))
+                self.votes = int(numonly.sub('', rating.cssselect('div .starbar-meta a')[0].text))
                 top = rating.cssselect('div .starbar-special a')
                 if top:
                     self.top = top[0].text
         except (AttributeError, IndexError):
             self.rating = None
-            self.votes = 'No votes'
+            self.votes = None
             self.top = None
         
 
-        self.plot = self._infodiv('plot')
+        self.plot = self._infodiv('plot').strip(' |')
         self.tagline = self._infodiv('tagline')
-        self.release = self._infodiv('releasedate')
+        try:
+            releasedate, releasecountry = self._infodiv('releasedate').split('(', 2)
+            self.release = (datetime.date(*datetime.datetime.strptime(releasedate.strip(), '%d %B %Y').timetuple()[:3]), releasecountry.strip(' )'))
+        except ValueError:
+            pass
         self.usercomment = self._infodiv('usercomments')
         self.runtime = self._infodiv('runtime')
         self.countries = self._infodiv('country', find='a')
@@ -116,12 +128,16 @@ class Title(object):
         for x in data.cssselect('table.cast tr'):
             character = x.cssselect('.char a') or x.cssselect('.char')
             if character:
-                character = character[0].text and character[0].text.strip() or None
+                characterid = character[0].get('href', None)
+                characterid = characterid.split('/')[2] if characterid else characterid
+                character = character[0].text and ''.join(character[0].text.split('/')[0]).strip() or None
 
             name = x.cssselect('.nm a') or x.cssselect('.nm')
             if name:
+                nameid = name[0].get('href', None)
+                nameid = nameid.split('/')[2] if nameid else nameid
                 name = name[0].text.strip()
-                self.cast.append((name, character))
+                self.cast.append(((name, nameid), (character, characterid)))
         
         try:
             self.posterurl = data.cssselect('div.photo img')[0].get('src')
@@ -132,11 +148,12 @@ class Title(object):
 
         if self.fullplot:
             try:
-                data = urllib2.urlopen("http://www.imdb.com/title/tt%s/plotsummary" % self.id)
+                data = urllib2.urlopen("http://www.imdb.com/title/%s/plotsummary" % self.id)
                 data = parse(data).getroot()
                 self.fullplot = data.cssselect('p.plotpar')[0].text.strip()
             except (urllib2.HTTPError, AttributeError, IndexError):
-                pass    
+                pass
+        del self.infodivs
 
 class Name(object):
     def __init__(self, id):
@@ -144,13 +161,14 @@ class Name(object):
             id = str(id)
         m = re.search(r"(?:nm)?(?P<id>\d{7})", id, re.I)
         if m:
-            self.id = m.group("id")
+            self.id = 'nm%s' % m.group("id")
         else:
             raise ValueError("Invalid IMDB id. (%s)" % id)
 
         self.name = None
         self.birthdate = None
         self.birthplace = None
+        self.deathdate = None
         self.deathdate = None
         self.biography = None
         self.trivia = None
@@ -164,7 +182,9 @@ class Name(object):
     def _infodiv(self, title, find=None):
         try:
             if not find:
-                return self.infodivs[title].text.replace('\n', '').strip()
+                for el in self.infodivs[title].cssselect('.tn15more'):
+                    el.drop_tree()
+                return self.infodivs[title].text_content().replace('\n', '').strip()
             else:
                 return [x.text.replace('\n', '').strip() for x in self.infodivs[title].findall('.//%s' % find)]
                 
@@ -177,7 +197,7 @@ class Name(object):
 
     def update(self):
         try:
-            data = urllib2.urlopen('http://www.imdb.com/name/nm%s/' % self.id)
+            data = urllib2.urlopen('http://www.imdb.com/name/%s/' % self.id)
         except urllib2.HTTPError:
             raise ValueError("Invalid IMDB id. (%s)" % self.id)
         data = parse(data).getroot()
@@ -196,14 +216,55 @@ class Name(object):
             self.name = data.find('head').find('title').text
         except AttributeError:
             self.name = 'Unknown name'
-            
-        self.birthdate = ' '.join(self._infodiv('dateofbirth', find='a')[:2])
-        try:
-            self.birthplace = self._infodiv('dateofbirth', find='a')[2]
-        except IndexError:
-            pass
         
-        self.deathdate = ' '.join(self._infodiv('dateofdeath', find='a')[:2]) or None
+        if 'dateofbirth' in self.infodivs:
+            birthattrs = self.infodivs['dateofbirth'].findall('.//a')
+            if birthattrs:
+                birthday = None
+                birthyear = None
+                for attr in birthattrs:
+                    href = attr.get('href').lower()
+                    attr.text = attr.text.strip()
+                    if 'onthisday' in href:
+                        birthday = attr.text
+                    elif 'borninyear' in href:
+                        birthyear = attr.text
+                    elif 'bornwhere' in href:
+                        self.birthplace = attr.text
+                if birthday and birthyear:
+                    try:
+                        self.birthdate = datetime.date(*datetime.datetime.strptime('%s %s' % (birthday, birthyear), '%d %B %Y').timetuple()[:3])
+                    except ValueError:
+                        pass
+                elif birthyear:
+                    try:
+                        self.birthdate = datetime.date(*datetime.datetime.strptime(birthyear, '%Y').timetuple()[:3])
+                    except ValueError:
+                        pass
+            
+        
+        if 'dateofbirth' in self.infodivs:
+            deathattrs = self.infodivs['dateofdeath'].findall('.//a')[:2]
+            if deathattrs:
+                for attr in deathattrs:
+                    href = attr.get('href').lower()
+                    attr.text = attr.text.strip()
+                    if 'onthisday' in href:
+                        deathday = attr.text
+                    elif 'diedinyear' in href:
+                        deathyear = attr.text
+                        self.deatplace = attr.tail.strip(' ,\n')
+                if deathday and deathyear:
+                    try:
+                        self.deathdate = datetime.date(*datetime.datetime.strptime('%s %s' % (deathday, deathyear), '%d %B %Y').timetuple()[:3])
+                    except ValueError:
+                        pass
+                elif birthyear:
+                    try:
+                        self.deathdate = datetime.date(*datetime.datetime.strptime(deathyear, '%Y').timetuple()[:3])
+                    except ValueError:
+                        pass
+                        
         self.biography = self._infodiv('minibiography')
         self.trivia = self._infodiv('trivia')
         self.awards = self._infodiv('awards')
@@ -220,11 +281,13 @@ class Name(object):
 
         
         try:
-            data = urllib2.urlopen('http://www.imdb.com/name/nm%s/filmorate' % self.id)
+            data = urllib2.urlopen('http://www.imdb.com/name/%s/filmorate' % self.id)
             data = parse(data).getroot()
             self.filmography = [x.text for x in data.cssselect('.filmo li > a')]
         except urllib2.HTTPError:
             pass
+        
+        del self.infodivs
 
 
 
@@ -291,7 +354,11 @@ class Search(object):
 if __name__ == "__main__":
     from pprint import pprint
     t = Title("tt0499549")
+    #t = Title("0780653")
     pprint(t.__dict__)
     
-    n = Name("nm0000295")
-    pprint(n.__dict__)
+    #n = Name("nm0000008")
+    #pprint(n.__dict__)
+    
+    #n = Name("0181365")
+    #pprint(n.__dict__)
