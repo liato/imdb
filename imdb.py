@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import datetime
 from decimal import Decimal
 import re
@@ -5,22 +6,39 @@ import urllib2
 
 from lxml.html import parse
 
+__version__ = '0.1.0'
+
 asciionly = re.compile(r'[^a-zA-Z]')
 numonly = re.compile(r'[^0-9]')
-
+findyear = re.compile(r' \(?(?P<year>\d{4})(?:/[IV]*)?\)')
+findid = re.compile(r'(?P<id>(?:tt|nm|ch)\d{7})', re.I)
+def getid(str):
+    m = findid.search(str)
+    if m:
+        return m.group('id')
+    return None
+    
 class InvalidIDException(Exception):
     def __str__(self):
         return repr(self.args[0])
 
 class Title(object):
     def __init__(self, id, fullplot = False):
-        if isinstance(id, int):
-            id = str(id)
-        m = re.search(r'(?:tt)?(?P<id>\d{7})', id, re.I)
-        if m:
-            self.id = 'tt%s' % m.group('id')
-        else:
+        self.data = None
+        if id is None:
             raise ValueError('Invalid IMDB id. (%s)' % id)
+        elif isinstance(id, SearchResult):
+            self.id = id.id
+            if id.data is not None:
+                self.data = id.data
+        else:
+            if isinstance(id, int) and (0 <= id <= 9999999):
+                id = '%7s' % id
+            m = re.search(r'(?:tt)?(?P<id>\d{7})', id, re.I)
+            if m:
+                self.id = 'tt%s' % m.group('id')
+            else:
+                raise ValueError('Invalid IMDB id. (%s)' % id)
 
         self.title = None
         self.genres = []
@@ -61,12 +79,14 @@ class Title(object):
 
 
     def update(self):
-        try:
-            data = urllib2.urlopen('http://www.imdb.com/title/%s/' % self.id)
-        except urllib2.HTTPError, e:
-            raise ValueError('Invalid IMDB id. (%s)' % self.id)
-
-        data = parse(data).getroot()
+        if self.data:
+            data = self.data
+        else:
+            try:
+                data = urllib2.urlopen('http://www.imdb.com/title/%s/' % self.id)
+            except urllib2.HTTPError, e:
+                raise ValueError('Invalid IMDB id. (%s)' % self.id)
+            data = parse(data).getroot()
 
         self.infodivs = {}
         for e in data.cssselect('#tn15content div.info'):
@@ -126,18 +146,21 @@ class Title(object):
         self.languages = self._infodiv('language', find='a')
         self.cast = []
         for x in data.cssselect('table.cast tr'):
+            characters = []
             character = x.cssselect('.char a') or x.cssselect('.char')
             if character:
-                characterid = character[0].get('href', None)
-                characterid = characterid.split('/')[2] if characterid else characterid
-                character = character[0].text and ''.join(character[0].text.split('/')[0]).strip() or None
+                for c in character:
+                    characterid = c.get('href', None)
+                    characterid = getid(characterid)
+                    charactername = c.text and ''.join(c.text.split('/')[0]).strip() or None
+                    characters.append((charactername, characterid))
 
             name = x.cssselect('.nm a') or x.cssselect('.nm')
             if name:
                 nameid = name[0].get('href', None)
                 nameid = nameid.split('/')[2] if nameid else nameid
                 name = name[0].text.strip()
-                self.cast.append(((name, nameid), (character, characterid)))
+                self.cast.append(((name, nameid), characters))
         
         try:
             self.posterurl = data.cssselect('div.photo img')[0].get('src')
@@ -154,16 +177,25 @@ class Title(object):
             except (urllib2.HTTPError, AttributeError, IndexError):
                 pass
         del self.infodivs
+        self.data = None
 
 class Name(object):
     def __init__(self, id):
-        if isinstance(id, int):
-            id = str(id)
-        m = re.search(r"(?:nm)?(?P<id>\d{7})", id, re.I)
-        if m:
-            self.id = 'nm%s' % m.group("id")
+        self.data = None
+        if id is None:
+            raise ValueError('Invalid IMDB id. (%s)' % id)
+        elif isinstance(id, SearchResult):
+            self.id = id.id
+            if id.data is not None:
+                self.data = id.data
         else:
-            raise ValueError("Invalid IMDB id. (%s)" % id)
+            if isinstance(id, int) and (0 <= id <= 9999999):
+                id = '%7s' % id
+            m = re.search(r"(?:nm)?(?P<id>\d{7})", id, re.I)
+            if m:
+                self.id = 'nm%s' % m.group("id")
+            else:
+                raise ValueError("Invalid IMDB id. (%s)" % id)
 
         self.name = None
         self.birthdate = None
@@ -173,7 +205,7 @@ class Name(object):
         self.biography = None
         self.trivia = None
         self.awards = None
-        self.altnames = []
+        self.alternatenames = []
         self.filmography = []
         self.photourl = None
         self.update()
@@ -196,11 +228,14 @@ class Name(object):
 
 
     def update(self):
-        try:
-            data = urllib2.urlopen('http://www.imdb.com/name/%s/' % self.id)
-        except urllib2.HTTPError:
-            raise ValueError("Invalid IMDB id. (%s)" % self.id)
-        data = parse(data).getroot()
+        if self.data:
+            data = self.data
+        else:
+            try:
+                data = urllib2.urlopen('http://www.imdb.com/name/%s/' % self.id)
+            except urllib2.HTTPError:
+                raise ValueError("Invalid IMDB id. (%s)" % self.id)
+            data = parse(data).getroot()
 
         self.infodivs = {}
         for e in data.cssselect('#tn15content div.info'):
@@ -243,7 +278,7 @@ class Name(object):
                         pass
             
         
-        if 'dateofbirth' in self.infodivs:
+        if 'dateofdeath' in self.infodivs:
             deathattrs = self.infodivs['dateofdeath'].findall('.//a')[:2]
             if deathattrs:
                 for attr in deathattrs:
@@ -270,7 +305,7 @@ class Name(object):
         self.awards = self._infodiv('awards')
         if self.awards:
             self.awards = re.sub(r'\s+', ' ', self.awards.strip())
-        self.altnames = self._infodiv('alternatenames')
+        self.alternatenames = self._infodiv('alternatenames')
  
         try:
             self.photourl =  data.cssselect('div.photo img')[0].get('src')
@@ -288,77 +323,157 @@ class Name(object):
             pass
         
         del self.infodivs
+        self.data = None
 
-
-
-class Search(object):
-    def __init__(self, string, name=False):
-        self.searchstring = string
-        self.result = None
+class SearchResult(object):
+    def __init__(self, name, id, data=None, **kwargs):
         self.name = name
-        self.update()
+        self.id = id
+        self.data = data
+        self.kwargs = kwargs
+        
+    def __repr__(self):
+        return repr('<%s%s [%s]>' % (self.name, (' %s' % self.kwargs.get('extras', None) if self.kwargs.get('extras', None) else ''), self.id))
 
-    def update(self, searchstring = None):
-        if not searchstring:
-            searchstring = self.searchstring
-        else:
-            self.searchstring = searchstring
-       
-        m = re.search(r"(?P<result>(?:nm|tt)\d{7})", searchstring, re.I)
-        if m:
-            self.result = m.group("result")
-            return
+    __str__ = __repr__        
+
+
+class TitleSearch(object):
+    def __init__(self, query):
+        self.query = query
+        self.query_year = None
+        self.results = []
+        self.bestmatch = None
+        self.search()
         
-        if self.name:
-            regex = [r"<a href=\"\/name\/(nm\d{7})\/\"[^>]*>([^<]*?)</a>"]
-            url = "http://www.imdb.com/find?s=nm&q=%s" % urllib2.quote(searchstring.encode('latin-1'))
-        else:
-            m = re.search(r"(?P<movie>.+?)(?: \(?(?P<year>\d{4})\)?)?$", searchstring, re.I)
-            movie = m.group("movie").strip(" ")
-            year = m.group("year")
-            movie = re.escape(movie)
-    
-            regex = []
-            if year:
-               year = re.escape(year)
-               regex.append(r"<a href=\"\/title\/(tt\d{7})\/\"[^>]*>("+movie+")</a> \("+year+"\)")
-               regex.append(r"<a href=\"\/title\/(tt\d{7})\/\"[^>]*>("+movie+", The)</a> \("+year+"\)")
-               regex.append(r"<a href=\"\/title\/(tt\d{7})\/\"[^>]*>(\""+movie+"\")</a> \("+year+"\)")
-               regex.append(r"<a href=\"\/title\/(tt\d{7})\/\"[^>]*>([^<]*?"+movie+"[^<]*?)</a> \("+year+"\)")
-               regex.append(r"<a href=\"\/title\/(tt\d{7})\/\"[^>]*>([^<]*?)</a> \("+year+"\)")
-            regex.append(r"<a href=\"\/title\/(tt\d{7})\/\"[^>]*>("+movie+")</a>")
-            regex.append(r"<a href=\"\/title\/(tt\d{7})\/\"[^>]*>("+movie+", The)</a>")
-            regex.append(r"<a href=\"\/title\/(tt\d{7})\/\"[^>]*>(\""+movie+"\")</a>")
-            regex.append(r"<a href=\"\/title\/(tt\d{7})\/\"[^>]*>([^<]*?"+movie+"[^<]*?)</a>")
-            regex.append(r"<a href=\"\/title\/(tt\d{7})\/\"[^>]*>([^<]*?)</a>")
-            url = "http://www.imdb.com/find?s=tt&q=%s" % urllib2.quote(m.group("movie").encode('latin-1'))
-        
-    
-        url = urllib2.urlopen(url)
-        if "/find?s=" not in url.url: # We've been redirected to the first result
-            m = re.search(r"/(?:name|title)/(?P<result>(?:nm|tt)\d{7})", url.url, re.I)
-            if m:
-                self.result = m.group("result")
-                return
+    def search(self, query=None):
+        self.query = query or self.query
+        m = re.search(r'(?P<title>.+?)(?: \(?(?P<year>\d{4})(?:/[IV]*)?\)?)?$', self.query, re.I)
+        if m.group('year'):
+            self.query = m.group('title').strip()
+            self.query_year = m.group('year').strip()
+
+        try:
+            data = urllib2.urlopen('http://www.imdb.com/find?s=tt&q=%s' % urllib2.quote(self.query).encode('latin-1'))
+        except urllib2.HTTPError, e:
+            raise ValueError('Unable to connect to IMDB.')
             
-        #data = _unescape(url.read())
-        data = url.read()
+        if "/find?s=" not in data.url: # We've been redirected to the first result
+            url = data.url
+            data = parse(data).getroot()
+            try:
+                title = data.find('head').find('title').text
+            except AttributeError:
+                pass
+            else:
+                year = findyear.search(title)
+                if year:
+                    year = year.group('year')
+                self.results.append(SearchResult(title, getid(url), data=data, year=year))
+                self.bestmatch = self.results[0]
+            
+            
+        else:
+            data = parse(data).getroot()
+            results = data.cssselect('td[valign="top"]')
+           
+            for t in results:
+                i = None
+                if len(t) >= 1 and t[0].tag == 'a' and t[0].text and t[0].tail:
+                    i = 0
+                elif len(t) >= 3 and t[2].tag == 'a' and t[2].text and t[2].tail:
+                    i = 2
+                if not i is None:
+                    year = findyear.search(t[i].tail)
+                    if year:
+                        year = year.group('year')
+                    self.results.append(SearchResult(t[i].text.strip(), getid(t[i].attrib['href']), extras=t[i].tail.strip(), year=year))
 
-        self.result = None
-        for x in regex:
-            m = re.search(x, data, re.IGNORECASE)
-            if m:
-                self.result = m.group(1)
-                break
+            if self.results:
+                if self.query_year:
+                    for r in self.results:
+                        if r.name.lower() == self.query.lower() and self.query_year == r.year:
+                            self.bestmatch = r
+                            break
+
+                    if not self.bestmatch:
+                        for r in self.results:
+                            if r.name.lower() == ('the %s' % self.query.lower()) and self.query_year == r.year:
+                                self.bestmatch = r
+                                break
+
+                    if not self.bestmatch:
+                        for r in self.results:
+                            if r.name.lower() == ('"%s"' % self.query.lower()) and self.query_year == r.year:
+                                self.bestmatch = r
+                                break
+                
+                if not self.bestmatch:
+                    for r in self.results:
+                        if r.name.lower() == self.query.lower():
+                            self.bestmatch = r
+                            break
+
+                if not self.bestmatch:
+                    for r in self.results:
+                        if r.name.lower() == ('the %s' % self.query.lower()):
+                            self.bestmatch = r
+                            break
+
+                if not self.bestmatch:
+                    for r in self.results:
+                        if r.name.lower() == ('"%s"' % self.query.lower()):
+                            self.bestmatch = r
+                            break
+                        
+                if not self.bestmatch:
+                    self.bestmatch = self.results[0]
+                    
+
+class NameSearch(object):
+    def __init__(self, query):
+        self.query = query
+        self.results = []
+        self.bestmatch = None
+        self.search()
+        
+    def search(self, query=None):
+        self.query = query or self.query
+        try:
+            data = urllib2.urlopen('http://www.imdb.com/find?s=nm&q=%s' % urllib2.quote(self.query).encode('latin-1'))
+        except urllib2.HTTPError, e:
+            raise ValueError('Unable to connect to IMDB.')
+            
+        if "/find?s=" not in data.url: # We've been redirected to the first result
+            url = data.url
+            data = parse(data).getroot()
+            try:
+                title = data.find('head').find('title').text
+            except AttributeError:
+                pass
+            else:
+                self.results.append(SearchResult(title, getid(url), data=data))
+                self.bestmatch = self.results[0]
+            
+            
+        else:
+            data = parse(data).getroot()
+            results = data.cssselect('td[valign="top"]')
+           
+            for t in results:
+                i = None
+                if len(t) >= 1 and t[0].tag == 'a' and t[0].text and t[0].tail:
+                    i = 0
+                elif len(t) >= 3 and t[2].tag == 'a' and t[2].text and t[2].tail:
+                    i = 2
+                if not i is None:
+                    self.results.append(SearchResult(t[i].text.strip(), getid(t[i].attrib['href']), t[i].tail.strip()))
+
+            if self.results:
+                self.bestmatch = self.results[0]                    
             
 if __name__ == "__main__":
     from pprint import pprint
-    t = Title("tt0499549")
-    #t = Title("0780653")
-    pprint(t.__dict__)
-    
-    #n = Name("nm0000008")
-    #pprint(n.__dict__)
-    
-    #n = Name("0181365")
-    #pprint(n.__dict__)
+    pprint(Title(TitleSearch('matrix').bestmatch).__dict__)
+    pprint(Name(NameSearch('kate beckinsale').bestmatch).__dict__)
+
