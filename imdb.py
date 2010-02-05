@@ -60,7 +60,9 @@ class Title(object):
         self.posterurl = None
         self.fullplot = fullplot
         self.update()
-
+    
+    def __repr__(self):
+        return "imdb.Title('%s'%s)" % (self.id, (', fullplot=True' if self.fullplot else ''))
 
     def _infodiv(self, title, find=None):
         try:
@@ -210,6 +212,8 @@ class Name(object):
         self.photourl = None
         self.update()
 
+    def __repr__(self):
+        return "imdb.Name('%s')" % self.id
 
     def _infodiv(self, title, find=None):
         try:
@@ -340,21 +344,26 @@ class SearchResult(object):
 
 class TitleSearch(object):
     def __init__(self, query):
+        self._query = query
         self.query = query
         self.query_year = None
         self.results = []
         self.bestmatch = None
         self.search()
+
+    def __repr__(self):
+        return "imdb.TitleSearch(%r)" % self._query
         
     def search(self, query=None):
         self.query = query or self.query
+        self._query = query or self._query
         m = re.search(r'(?P<title>.+?)(?: \(?(?P<year>\d{4})(?:/[IV]*)?\)?)?$', self.query, re.I)
         if m.group('year'):
             self.query = m.group('title').strip()
             self.query_year = m.group('year').strip()
 
         try:
-            data = urllib2.urlopen('http://www.imdb.com/find?s=tt&q=%s' % urllib2.quote(self.query).encode('latin-1'))
+            data = urllib2.urlopen('http://www.imdb.com/find?s=tt&q=%s' % urllib2.quote(self.query.encode('latin-1')))
         except urllib2.HTTPError, e:
             raise ValueError('Unable to connect to IMDB.')
             
@@ -437,10 +446,13 @@ class NameSearch(object):
         self.bestmatch = None
         self.search()
         
+    def __repr__(self):
+        return "imdb.NameSearch(%r)" % self.query
+        
     def search(self, query=None):
         self.query = query or self.query
         try:
-            data = urllib2.urlopen('http://www.imdb.com/find?s=nm&q=%s' % urllib2.quote(self.query).encode('latin-1'))
+            data = urllib2.urlopen('http://www.imdb.com/find?s=nm&q=%s' % urllib2.quote(self.query.encode('latin-1')))
         except urllib2.HTTPError, e:
             raise ValueError('Unable to connect to IMDB.')
             
